@@ -1,0 +1,57 @@
+name: agentbench
+
+x-image: &image ${AGENTBENCH_IMAGE:-ghcr.io/elias02345/agentbench:latest}
+
+services:
+  init:
+    image: *image
+    command: ["node", "/app/docker/bootstrap.mjs"]
+    user: "0:0"
+    read_only: true
+    network_mode: none
+    cap_drop: [ALL]
+    cap_add: [CHOWN, DAC_OVERRIDE, FOWNER]
+    security_opt: [no-new-privileges:true]
+    environment:
+      AGENTBENCH_IMAGE: *image
+      AGENTBENCH_BIND: "${AGENTBENCH_BIND:-127.0.0.1}"
+      AGENTBENCH_PORT: "${AGENTBENCH_PORT:-4173}"
+      AGENTBENCH_SEED: "${AGENTBENCH_SEED:-1}"
+      AGENTBENCH_UID: "${AGENTBENCH_UID:-1000}"
+      AGENTBENCH_GID: "${AGENTBENCH_GID:-1000}"
+    volumes:
+      - type: bind
+        source: .
+        target: /deployment
+        bind:
+          create_host_path: false
+
+  app:
+    image: *image
+    depends_on:
+      init:
+        condition: service_completed_successfully
+    init: true
+    user: "${AGENTBENCH_UID:-1000}:${AGENTBENCH_GID:-1000}"
+    restart: unless-stopped
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    stop_grace_period: 30s
+    environment:
+      AGENTBENCH_SEED: "${AGENTBENCH_SEED:-1}"
+    ports:
+      - target: 4173
+        published: "${AGENTBENCH_PORT:-4173}"
+        host_ip: "${AGENTBENCH_BIND:-127.0.0.1}"
+        protocol: tcp
+    volumes:
+      - type: bind
+        source: ./data
+        target: /data
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:4173/api/catalog').then(r=>{if(!r.ok)process.exitCode=1}).catch(()=>{process.exitCode=1})"]
+      interval: 10s
+      timeout: 3s
+      start_period: 10s
+      retries: 3
