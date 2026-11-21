@@ -29,7 +29,7 @@ function createDotenv(owner) {
     if (!current.isFile()) throw new Error('.env must be a regular file');
     return;
   }
-  const names = ['AGENTBENCH_IMAGE', 'AGENTBENCH_BIND', 'AGENTBENCH_PORT', 'AGENTBENCH_SEED', 'AGENTBENCH_UID', 'AGENTBENCH_GID'];
+  const names = ['AGENTBENCH_IMAGE', 'AGENTBENCH_BIND', 'AGENTBENCH_PORT', 'AGENTBENCH_UID', 'AGENTBENCH_GID'];
   const lines = names.map(name => {
     const value = process.env[name] ?? '';
     if (!/^[A-Za-z0-9./_:@-]+$/.test(value)) throw new Error('Invalid value for ' + name);

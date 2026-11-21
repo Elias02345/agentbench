@@ -29,14 +29,15 @@ const main=document.querySelector('#main');
 const dialog=document.querySelector('#run-dialog');
 const state={
   lang:localStorage.getItem('agentbench-lang')==='en'?'en':'de', catalog:[], runs:[],
-  connection:{endpoint:'',hasKey:false}, version:'', online:false,running:false,
-  runFilter:'all', compareMode:'',cohort:'', detail:null, trace:[], caseIndex:0, models:[],
+  models:[], legacyEndpoint:'', editingModel:null, version:'', online:false,running:false,
+  runFilter:'all',cohort:'', detail:null, trace:[], caseIndex:0,
 };
 const t=key=>copy[state.lang][key]??key;
 const loc=obj=>obj?.[state.lang]??'';
 const score=value=>value==null?'—':String(value);
 const sc=id=>state.catalog.find(s=>s.id===id);
-const modelLink=run=>`<a class="model-link" href="#run/${esc(run.id)}">${esc(run.model)}</a>`;
+const modelName=run=>run.config.label||run.model;
+const modelLink=run=>`<a class="model-link" href="#run/${esc(run.id)}">${esc(modelName(run))}</a>`;
 const status=value=>`<span class="pill ${esc(value)}">${esc(t(value==='queued'?'waiting':value))}</span>`;
 const suitability=value=>value?`<span class="pill ${{strong:'pass',mixed:'warn',weak:'warn',critical:'fail'}[value]}">${t(value==='critical'?'criticalFit':value)}</span>`:'—';
 const mode=value=>`<span class="pill ${esc(value)}">${esc(t(value))}</span>`;
@@ -47,7 +48,10 @@ const elapsed=(ms)=>{
   if(ms==null) return '—';
   return ms<1000?`${num(ms)} ms`:`${num(Math.round(ms/100)/10)} s`;
 };
-function errorText(code) {
+function errorText(code,detail='') {
+  return [errorLabel(code),detail].filter(Boolean).join(' · ');
+}
+function errorLabel(code) {
   const exact=copy[state.lang].errors[code];
   if(exact) return exact;
   if(/^provider_http_\d{3}$/.test(code??'')) return `API · HTTP ${code.slice(-3)}`;
@@ -57,7 +61,7 @@ async function api(path,data) {
   const options=data===undefined?{}:{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(data)};
   const response=await fetch('/api/'+path,options);
   const value=await response.json();
-  if(!response.ok) throw new Error(value.error??'server_error');
+  if(!response.ok) throw Object.assign(new Error(value.error??'server_error'),{detail:value.detail});
   return value;
 }
 const nav=[[['dashboard','grid'],['runs','activity'],['compare','bars'],['scenarios','layers']],[['connection','plug']]];
@@ -84,7 +88,8 @@ function worker() {
   if(system) system.innerHTML=`<i class="dot ${dot}"></i>${t(key)}`;
 }
 const button=(label,symbol,attrs='',kind='')=>`<button class="btn ${kind}" type="button" ${attrs}>${symbol?icon(symbol):''}${label}</button>`;
-const newButton=()=>button(t('newRun'),'plus','data-new-run','primary');
+const newButton=()=>state.models.length?button(t('newRun'),'plus','data-new-run','primary')
+  : `<a class="btn primary" href="#connection">${icon('plus')}${t('addModel')}</a>`;
 const link=(label,href,symbol='arrow')=>`<a class="btn text" href="${href}">${label}${icon(symbol)}</a>`;
 const header=(title,subtitle,action='')=>`<section class="page-head"><div><h1>${title}</h1><p>${subtitle}</p></div>${action}</section>`;
 const panelHeader=(title,subtitle='',action='')=>`<div class="panel-heading"><div><h2>${title}</h2>${subtitle?`<p>${subtitle}</p>`:''}</div>${action}</div>`;
@@ -92,7 +97,7 @@ const empty=label=>`<div class="empty">${label}</div>`;
 function table(rows) {
   if(!rows.length) return empty(t('noRuns'));
   return `<div class="table-wrap"><table><thead><tr>${['model','mode','status','coverage','score','date'].map(k=>`<th scope="col">${t(k)}</th>`).join('')}</tr></thead><tbody>
-  ${rows.map(run=>`<tr><td>${modelLink(run)}</td><td>${mode(run.mode)}</td><td>${status(run.status)}</td><td class="num">${run.summary.done} / ${run.summary.total}</td><td class="num"><strong>${score(run.summary.score)}</strong></td><td>${date(run.created)}</td></tr>`).join('')}</tbody></table></div>`;
+  ${rows.map(run=>`<tr><td>${modelLink(run)}</td><td>${mode(run.mode)}</td><td>${status(run.status)}${run.failure?`<div class="hint run-error">${esc(errorLabel(run.failure.code))}</div>`:''}</td><td class="num">${run.summary.done} / ${run.summary.total}</td><td class="num"><strong>${score(run.summary.score)}</strong></td><td>${date(run.created)}</td></tr>`).join('')}</tbody></table></div>`;
 }
 function configKey(run) {
   const {version,scenarios,languages,maxTurns,repeats}=run.config;
@@ -113,23 +118,21 @@ const scenarioIcon=(sc,index)=>`<span class="scenario-icon ${tone(index)}">${ico
 function chart(rows) {
   if(!rows.length) return empty(t('noScores'));
   return `<div class="legend">${['en','de'].map(lang=>`<span><i class="${lang}"></i>${t(lang)}</span>`).join('')}</div>
-    <div class="chart" role="img" aria-label="${esc(rows.map(run=>`${run.model}: ${t('en')} ${score(run.summary.langs.en.score)}, ${t('de')} ${score(run.summary.langs.de.score)}`).join('. '))}">
+    <div class="chart" role="img" aria-label="${esc(rows.map(run=>`${modelName(run)}: ${t('en')} ${score(run.summary.langs.en.score)}, ${t('de')} ${score(run.summary.langs.de.score)}`).join('. '))}">
       <div class="chart-axis" aria-hidden="true">${[100,75,50,25,0].map(n=>`<span>${n}</span>`).join('')}</div>
       <div class="chart-plot" aria-hidden="true"><div class="chart-grid">${Array.from({length:5},()=>'<i></i>').join('')}</div><div class="chart-groups">
         ${rows.map(run=>`<div class="chart-group">${['en','de'].map(lang=>{const value=run.summary.langs[lang].score;return value==null?'':`<div class="bar ${lang}" style="--score:${Number(value)}"><b>${value}</b></div>`;}).join('')}</div>`).join('')}
-      </div></div><div class="chart-labels" aria-hidden="true">${rows.map(run=>`<span title="${esc(run.model)}">${esc(run.model)}</span>`).join('')}</div>
+      </div></div><div class="chart-labels" aria-hidden="true">${rows.map(run=>`<span title="${esc(modelName(run))}">${esc(modelName(run))}</span>`).join('')}</div>
     </div>`;
 }
 function dashboard() {
-  const done=complete();
-  const live=done.filter(r=>r.mode==='live');
-  const source=live.length?live:done.filter(r=>r.mode==='demo');
+  const source=complete();
   const baseline=source.find(run=>run.config.scenarios.length===state.catalog.length && run.config.languages.length===2)??source[0];
   const chartRows=baseline?cohortRows(source.filter(run=>configKey(run)===configKey(baseline))).slice(0,5):[];
   const best=chartRows.length?Math.max(...chartRows.map(r=>r.summary.score)):null;
   const stats=[
-    ['checkCircle','finishedRuns',done.length,'includesDemo'],['layers','availableScenarios',state.catalog.length,'workflowSet'],
-    ['target','bestScore',best==null?'—':`${best}/100`,live.length?'liveBest':'demoBest'],['globe','testLanguages',2,'languagesLong'],
+    ['checkCircle','finishedRuns',source.length,'serialShort'],['layers','availableScenarios',state.catalog.length,'workflowSet'],
+    ['target','bestScore',best==null?'—':`${best}/100`,'liveBest'],['globe','testLanguages',2,'languagesLong'],
   ];
   return header(t('title'),t('subtitle'),newButton())+`
   <section class="hero"><div class="orbits" aria-hidden="true"><i style="--angle:0deg"></i><i style="--angle:60deg"></i><i style="--angle:-60deg"></i><span class="orbit-core">${icon('box')}</span></div>
@@ -150,16 +153,13 @@ function runs() {
   <section class="panel">${table(state.runs.filter(run=>state.runFilter==='all'||run.status===state.runFilter))}</section>`;
 }
 function compare() {
-  const done=complete();
-  const chosen=state.compareMode || (done.some(r=>r.mode==='live')?'live':'demo');
-  const matching=done.filter(r=>r.mode===chosen);
+  const matching=complete();
   const cohorts=new Map(matching.map(run=>[configKey(run),run.config]));
   const active=cohorts.has(state.cohort)?state.cohort:cohorts.keys().next().value;
   const fitOrder={strong:0,mixed:1,weak:2,critical:3};
   const rows=cohortRows(matching.filter(run=>configKey(run)===active)).sort((a,b)=>
     fitOrder[a.summary.suitability]-fitOrder[b.summary.suitability] || b.summary.score-a.summary.score);
   return header(t('compare'),t('compareSubtitle'),newButton())+`<div class="filters">
-    <label class="field"><span class="field-title">${t('dataset')}</span><select class="input" data-filter="compareMode">${['live','demo'].map(value=>`<option value="${value}" ${value===chosen?'selected':''}>${t(value)}</option>`).join('')}</select></label>
     ${cohorts.size?`<label class="field"><span class="field-title">${t('cohort')}</span><select class="input" data-filter="cohort">${[...cohorts].map(([key,config])=>`<option value="${esc(key)}" ${active===key?'selected':''}>v${esc(config.version)} · ${config.scenarios.length} ${t('scenarios')} · ${config.languages.join('/').toUpperCase()} · ${config.maxTurns} ${state.lang==='de'?'Runden':'turns'} · ×${config.repeats}${config.scenarios.length<state.catalog.length?' · '+config.scenarios.join(', '):''}</option>`).join('')}</select></label>`:''}</div>
     ${rows.length?`<section class="panel">${panelHeader(t('performance'),t('scoresLanguage'))}${chart(rows.slice(0,6))}
     <div class="table-wrap"><table><thead><tr>${['model','score','suitability','en','de','workflow','languageScore','passed','issues','toolCalls','token','duration'].map(k=>`<th scope="col">${t(k)}</th>`).join('')}</tr></thead><tbody>
@@ -183,21 +183,46 @@ function scenariosView(selected) {
     </article>`).join('')}</section>`;
 }
 function settings() {
-  const c=state.connection;
-  return header(t('connection'),t('connectionSubtitle'))+`<section class="panel settings-panel">
-  <form id="connection-form" class="stack">
-    <label class="field"><span class="field-title">${t('endpoint')}</span><input class="input" name="endpoint" required type="url" value="${esc(c.endpoint)}" placeholder="https://provider.example/v1" autocomplete="off" spellcheck="false"></label>
-    <label class="field"><span class="field-title">${t('apiKey')}</span><input class="input" name="key" type="password" placeholder="${c.hasKey?t('keySaved'):t('waitingKey')}" autocomplete="off"><small>${t('keyHint')}</small></label>
-    <p class="form-error" aria-live="polite" hidden></p>
-    <div class="settings-actions"><button type="submit" name="intent" value="save" class="btn primary">${icon('plug')}${t('save')}</button><button type="submit" name="intent" value="test" class="btn">${t('testConnection')}</button>
-    ${c.hasKey?`<button type="submit" name="intent" value="clear" class="btn danger">${t('removeKey')}</button>`:''}</div>
-    <div class="hint">${t('providerHint')}</div>
-  </form>
-  <div id="model-results">${modelResults()}</div></section>`;
-}
-function modelResults() {
-  if(!state.models.length) return '';
-  return `<div class="model-results"><strong>${t('discovered')}</strong><ul>${state.models.map(id=>`<li>${esc(id)}</li>`).join('')}</ul></div>`;
+  const current=state.editingModel??{};
+  const defaultEndpoint=state.models.at(-1)?.endpoint||state.legacyEndpoint;
+  const item=current.id;
+  return header(t('connection'),t('connectionSubtitle'))+`<div class="settings-grid">
+    <section class="panel settings-panel">
+      <h2>${t(item?'editModel':'addModel')}</h2>
+      <form id="model-form" class="stack">
+        <label class="field"><span class="field-title">${t('endpoint')}</span><input class="input" name="endpoint" required type="url" value="${esc(current.endpoint||defaultEndpoint)}" placeholder="https://provider.example/v1" autocomplete="off" spellcheck="false"><small>${t('localHint')}</small></label>
+        <label class="field"><span class="field-title">${t('apiKey')}</span><input class="input" name="key" type="password" placeholder="${current.hasKey?t('keySaved'):t('waitingKey')}" autocomplete="new-password"><small>${t('keyHint')}</small></label>
+        <label class="remember"><input type="checkbox" name="rememberKey" ${current.rememberKey?'checked':''}>${t('rememberKey')}</label>
+        <div class="field">
+          <label class="field-title" for="model-id">${t('modelId')}</label>
+          <div class="model-picker"><input id="model-id" class="input" name="model" list="model-suggestions" required maxlength="180" value="${esc(current.model||'')}" placeholder="provider/model-id" autocomplete="off" spellcheck="false">
+          <button type="submit" name="intent" value="discover" class="btn" formnovalidate>${t('testConnection')}</button></div>
+          <datalist id="model-suggestions"></datalist>
+        </div>
+        <label class="field"><span class="field-title">${t('modelLabel')}</span><input name="label" class="input" maxlength="100" value="${esc(current.label||'')}"></label>
+        <p class="form-error" role="alert" hidden></p>
+        <div class="hint" id="model-feedback" role="status"></div>
+        <div class="settings-actions">
+          <button type="submit" name="intent" value="save" class="btn primary">${icon(item?'check':'plus')}${t(item?'saveModel':'addModel')}</button>
+          <button type="submit" name="intent" value="probe" class="btn">${icon('activity')}${t('probe')}</button>
+          ${current.hasKey?`<button type="submit" name="intent" value="clear" class="btn">${t('removeKey')}</button>`:''}
+          ${item?button(t('close'),'close','data-end-edit'):''}
+        </div>
+      </form>
+    </section>
+    <section class="panel models-panel">
+      ${panelHeader(t('savedModels'))}
+      ${state.models.length?`<ul class="saved-models">${state.models.map(model=>`<li class="saved-model">
+        <div class="saved-model-name"><strong>${esc(model.label||model.model)}</strong>
+          ${model.label?`<div>${esc(model.model)}</div>`:''}<div>${esc(model.endpoint)}</div>
+          <span class="pill ${model.hasKey?'pass':''}">${t(model.rememberKey?'keyOnDisk':model.hasKey?'keyInMemory':'noKey')}</span>
+        </div>
+        <div class="settings-actions">${button(t('editModel'),'',
+           `data-edit-model="${esc(model.id)}"`,'text')}${button(t('removeModel'),'',
+           `data-remove-model="${esc(model.id)}"`,'text danger')}</div>
+      </li>`).join('')}</ul>`:empty(t('noSavedModels'))}
+    </section>
+  </div>`;
 }
 function detail() {
   const run=state.detail;
@@ -208,13 +233,14 @@ function detail() {
   const chosen=sc(item?.scenario);
   const result=item?.result;
   const action=`<div class="page-actions"><a class="btn" href="/api/runs/${esc(run.id)}/export" download>${icon('download')}${t('export')}</a>${pending?button(t('cancel'),'close','data-cancel','danger'):button(t('reRun'),'plus','data-rerun','primary')}</div>`;
-  return header(esc(run.model),`${t('versions')} v${esc(run.config.version)} · ${date(run.created)} · ${t(run.mode)}`,action)+`
+  return header(esc(modelName(run)),`${t('versions')} v${esc(run.config.version)} · ${date(run.created)} · ${t(run.mode)}`,action)+`
     <section class="panel detail-card"><h2>${t('evaluation')} ${status(run.status)} ${s.suitability?suitability(s.suitability):''}</h2>
       <div class="detail-metrics">${[
         [t('score'),score(s.score)], [t('coverage'),`${s.done}/${s.total}`], [t('passed'),`${s.passes}/${s.scored}`],
         [t('issues'),s.critical], [t('en'),score(s.langs.en.score)], [t('de'),score(s.langs.de.score)],
       ].map(([label,value])=>`<span class="pill">${label} · ${value}</span>`).join('')}</div>
       ${pending?`<div class="progress" role="progressbar" aria-label="${t('coverage')}" aria-valuenow="${s.done}" aria-valuemin="0" aria-valuemax="${s.total}"><i style="width:${100*s.done/s.total}%"></i></div>`:''}
+      ${run.failure?`<p class="form-error">${esc(errorText(run.failure.code,run.failure.detail))}</p>${link(t('editConnection'),'#connection')}`:''}
       ${run.status==='partial'||run.status==='failed'?`<p>${t('noComplete')}</p>`:''}</section>
     <div class="detail-grid" style="margin-top:16px">
       <section class="panel">${panelHeader(t('cases'))}<div class="case-list">${run.cases.map(entry=>`<button type="button" class="case-button" data-case="${entry.idx}" aria-pressed="${entry.idx===item?.idx}"><span><small>${esc(entry.lang.toUpperCase())}</small>${esc(loc(sc(entry.scenario)?.title) || entry.scenario)}</span>${entry.result?.overall==null?status(entry.status):`<span class="pill ${entry.result.passed?'pass':'warn'}">${entry.result.overall}</span>`}</button>`).join('')}</div></section>
@@ -229,7 +255,7 @@ function detail() {
 function resultView(r) {
   const reason=t('endReasons')[r.endReason]??r.endReason;
   return `<div class="detail-block"><h3>${t('result')} · ${esc(reason)}</h3>
-    ${r.code?`<p class="form-error">${esc(errorText(r.code))}</p>`:''}
+    ${r.code?`<p class="form-error">${esc(errorText(r.code,r.detail))}</p>`:''}
     <div class="detail-metrics">${[[t('workflow'),score(r.workflowScore)],[t('languageScore'),score(r.languageScore)],[t('toolCalls'),r.calls??'—'],[t('token'),num(r.tokens)],[t('duration'),elapsed(r.durationMs)]].map(([label,value])=>`<span class="pill">${label} · ${value}</span>`).join('')}</div>
     ${r.checks?`<ul class="breakdown">${r.checks.map(check=>`<li class="${check.passed?'met':'miss'}">${icon(check.passed?'check':'close')}<span>${esc(loc(check.label))}${check.critical?` · <strong>${t('critical')}</strong>`:''}</span><span>${check.passed?check.weight:0}/${check.weight}</span></li>`).join('')}</ul><p>${t('languageHeuristic')}</p>`:''}
     <h3 style="margin-top:14px">${t('finalReply')}</h3><p class="reply">${esc(r.reply||t('missingReply'))}</p>
@@ -242,23 +268,21 @@ function traceView() {
 }
 let runForm={};
 function openRun(prefill={}) {
-  const connected=state.connection.endpoint;
-  runForm={mode:connected?'live':'demo',models:['Demo Operator','Demo Lite'],modelText:'',scenarios:state.catalog.map(s=>s.id),languages:['en','de'],maxTurns:20,repeats:1,endpoint:connected,key:'', ...prefill};
+  if(!state.models.length) { location.hash='#connection'; return; }
+  runForm={modelIds:[state.models[0].id],scenarios:state.catalog.map(s=>s.id),languages:['en','de'],maxTurns:20,repeats:1,...prefill};
   renderDialog();
   if(!dialog.open) dialog.showModal();
 }
-const option=(name,value,label,selected,type='checkbox')=>`<label class="option"><input type="${type}" name="${name}" value="${esc(value)}" ${selected?'checked':''}>${esc(label)}</label>`;
+const option=(name,value,label,selected)=>`<label class="option"><input type="checkbox" name="${name}" value="${esc(value)}" ${selected?'checked':''}>${esc(label)}</label>`;
 function renderDialog() {
   const r=runForm;
   dialog.setAttribute('aria-labelledby','dialog-title');
   dialog.innerHTML=`<form id="benchmark-form"><div class="dialog-head"><h2 id="dialog-title">${t('configure')}</h2><button class="btn" type="button" data-close aria-label="${t('close')}">${icon('close')}</button></div>
   <div class="dialog-body">
     <p class="hint">${t('configureText')}</p>
-    <div class="form-options" role="group" aria-label="${t('mode')}">${['demo','live'].map(m=>option('mode',m,t(m==='demo'?'demoMode':'apiMode'),m===r.mode,'radio')).join('')}</div>
-    ${r.mode==='demo'?`<div class="field"><span class="field-title">${t('model')}</span><div class="form-options">${['Demo Operator','Demo Lite'].map(m=>option('model',m,m,r.models.includes(m))).join('')}</div><small>${t('demoHint')}</small></div>`:`
-      <label class="field"><span class="field-title">${t('endpoint')}</span><input name="endpoint" type="url" class="input" required autocomplete="off" placeholder="https://provider.example/v1" value="${esc(r.endpoint)}"></label>
-      <label class="field"><span class="field-title">${t('apiKey')}</span><input name="key" type="password" class="input" autocomplete="off" placeholder="${state.connection.hasKey?t('keySaved'):t('waitingKey')}"></label>
-      <label class="field"><span class="field-title">${t('modelIds')}</span><textarea class="input" name="modelText" rows="2" required spellcheck="false">${esc(r.modelText)}</textarea><small>${t('modelIdsHint')}</small></label>`}
+    <div class="field"><span class="field-title">${t('savedModels')}</span><div class="check-grid">
+      ${state.models.map(model=>option('modelId',model.id,`${model.label||model.model} · ${new URL(model.endpoint).host}`,r.modelIds.includes(model.id))).join('')}
+    </div><small>${t('serialHint')}</small></div>
     <div class="field"><span class="field-title">${t('languageSelection')}</span><div class="form-options">${['en','de'].map(l=>option('language',l,t(l),r.languages.includes(l))).join('')}</div></div>
     <div class="field"><span class="field-title">${t('scenarioSelection')}</span><div class="check-grid">${state.catalog.map(s=>option('scenario',s.id,loc(s.title),r.scenarios.includes(s.id))).join('')}</div></div>
     <div class="two-col">
@@ -266,14 +290,10 @@ function renderDialog() {
       <label class="field"><span class="field-title">${t('repeat')}</span><input name="repeats" class="input" type="number" min="1" max="3" required value="${Number(r.repeats)}"></label>
     </div><p class="form-error" role="alert" hidden></p>
   </div><div class="dialog-foot">${button(t('close'),'','data-close')}<button class="btn primary" type="submit">${icon('activity')}${t('startRun')}</button></div></form>`;
-  if(r.key && r.mode==='live') dialog.querySelector('[name=key]').value=r.key;
 }
-function snapshotForm(form) {
+function benchmarkRequest(form) {
   const f=new FormData(form);
-  const next={...runForm,mode:f.get('mode'),scenarios:f.getAll('scenario'),languages:f.getAll('language'),maxTurns:Number(f.get('maxTurns')),repeats:Number(f.get('repeats'))};
-  if(f.has('endpoint')) Object.assign(next,{endpoint:f.get('endpoint').trim(),key:f.get('key').trim(),modelText:f.get('modelText')});
-  else next.models=f.getAll('model');
-  return next;
+  return {modelIds:f.getAll('modelId'),scenarios:f.getAll('scenario'),languages:f.getAll('language'),maxTurns:Number(f.get('maxTurns')),repeats:Number(f.get('repeats'))};
 }
 let toastTimer;
 function toast(message) {
@@ -285,7 +305,7 @@ function toast(message) {
 }
 function showError(form,error) {
   const output=form.querySelector('.form-error');
-  output.textContent=errorText(error.message);
+  output.textContent=errorText(error.message,error.detail);
   output.hidden=false;
 }
 function render() {
@@ -305,7 +325,7 @@ async function refresh(force=false) {
     const key=JSON.stringify(info.runs);
     const changed=runsHash!==key;
     runsHash=key;
-    state.runs=info.runs;
+    state.runs=info.runs.filter(run=>run.mode==='live');
     state.online=true;
     state.running=info.running||info.queued>0;
     worker();
@@ -368,8 +388,23 @@ document.addEventListener('click',async event=>{
     refresh(true);
   }
   if(el.hasAttribute('data-rerun') && state.detail) {
-    const {mode,model,config}=state.detail;
-    openRun({...config,mode,models:[model],modelText:mode==='live'?model:'',endpoint:config.endpoint??state.connection.endpoint});
+    const {model,config}=state.detail;
+    const saved=state.models.find(m=>m.id===config.modelId || (m.model===model && m.endpoint===config.endpoint));
+    openRun({...config,modelIds:saved?[saved.id]:[]});
+  }
+  if(el.dataset.editModel || el.hasAttribute('data-end-edit')) {
+    state.editingModel=state.models.find(model=>model.id===el.dataset.editModel)??null;
+    render();
+    main.querySelector('[name="endpoint"]')?.focus();
+  }
+  if(el.dataset.removeModel) {
+    try {
+      await api('models/remove',{id:el.dataset.removeModel});
+      state.models=state.models.filter(model=>model.id!==el.dataset.removeModel);
+      if(state.editingModel?.id===el.dataset.removeModel) state.editingModel=null;
+      render();
+      toast(t('modelRemoved'));
+    } catch(error) { toast(errorText(error.message,error.detail)); }
   }
   if(el.hasAttribute('data-cancel') && state.detail) {
     el.disabled=true;
@@ -382,39 +417,45 @@ dialog.addEventListener('close',()=>{runForm={};dialog.innerHTML='';});
 document.addEventListener('change',event=>{
   const el=event.target;
   if(el.dataset.filter){ state[el.dataset.filter]=el.value; render(); document.querySelector(`[data-filter="${el.dataset.filter}"]`)?.focus(); }
-  if(el.form?.id==='benchmark-form' && el.name==='mode') {
-    runForm=snapshotForm(el.form); renderDialog();
-    dialog.querySelector('[name=mode]:checked')?.focus();
-  }
 });
 document.addEventListener('submit',async event=>{
   const form=event.target;
-  if(!['connection-form','benchmark-form'].includes(form.id)) return;
+  if(!['model-form','benchmark-form'].includes(form.id)) return;
   event.preventDefault();
   const submit=event.submitter;
   if(submit) submit.disabled=true;
   form.querySelector('.form-error').hidden=true;
   try {
-    if(form.id==='connection-form') {
+    if(form.id==='model-form') {
       const f=new FormData(form);
-      const endpoint=f.get('endpoint').trim();
       const key=f.get('key').trim();
-      if(submit?.value==='test') {
-        const result=await api('connection/test',{endpoint,...(key?{key}:{})});
-        state.models=result.models;
-        document.querySelector('#model-results').innerHTML=modelResults()||`<p class="hint">${t('noModels')}</p>`;
+      const id=state.editingModel?.id;
+      const config={...(id?{id}:{}),endpoint:f.get('endpoint').trim(),
+        model:f.get('model').trim(),label:f.get('label').trim(),...(key?{key}:{})};
+      const intent=submit?.value??'save';
+      const output=form.querySelector('#model-feedback');
+      output.textContent='';
+      if(intent==='discover') {
+        const {models}=await api('models/discover',config);
+        form.querySelector('datalist').innerHTML=models.map(model=>`<option value="${esc(model)}"></option>`).join('');
+        if(models.length===1 && !config.model) form.elements.model.value=models[0];
+        output.textContent=models.length?`${models.length} ${t('modelsFound')}`:t('noModels');
+        form.elements.model.focus();
+      } else if(intent==='probe') {
+        output.textContent=t('probing');
+        await api('models/probe',config);
+        output.textContent=t('probeOk');
       } else {
-        state.connection=await api('connection',{endpoint,...(submit?.value==='clear'?{key:''}:key?{key}:{})});
-        state.models=[];
+        const saved=await api('models',{...config,rememberKey:intent!=='clear' && f.has('rememberKey'),
+          ...(intent==='clear'?{key:''}:{})});
+        if(id) state.models=state.models.map(model=>model.id===id?saved:model);
+        else state.models.push(saved);
+        state.editingModel=null;
         render();
-        toast(t('saved'));
+        toast(t('modelSaved'));
       }
     } else {
-      const r=snapshotForm(form);
-      const models=r.mode==='demo'?r.models:r.modelText.split(/\r?\n/).map(line=>line.trim()).filter(Boolean);
-      const request={mode:r.mode,models,scenarios:r.scenarios,languages:r.languages,maxTurns:r.maxTurns,repeats:r.repeats};
-      if(r.mode==='live') Object.assign(request,{endpoint:r.endpoint,...(r.key?{key:r.key}:{})});
-      const result=await api('runs',request);
+      const result=await api('runs',benchmarkRequest(form));
       dialog.close();
       toast(t('runCreated'));
       if(result.ids.length===1) {
@@ -424,16 +465,21 @@ document.addEventListener('submit',async event=>{
       } else if(route().name==='runs') refresh(true);
       else location.hash='#runs';
     }
-  } catch(error) { showError(form,error); }
+  } catch(error) {
+    const feedback=form.querySelector('#model-feedback');
+    if(feedback) feedback.textContent='';
+    showError(form,error);
+  }
   finally { if(submit) submit.disabled=false; }
 });
 shell();
 main.innerHTML=empty('…');
 try {
-  const [catalog,connection]=await Promise.all([api('catalog'),api('connection')]);
+  const [catalog,models]=await Promise.all([api('catalog'),api('models')]);
   state.catalog=catalog.scenarios;
   state.version=catalog.version;
-  state.connection=connection;
+  state.models=models.models;
+  state.legacyEndpoint=models.legacyEndpoint;
   navigate();
 } catch(error) {
   main.innerHTML=empty(esc(errorText(error.message)));

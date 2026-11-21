@@ -20,7 +20,11 @@ agentbench/
     └── agentbench.sqlite
 ```
 
-Die Oberfläche ist auf dem Server standardmäßig unter [http://127.0.0.1:4173](http://127.0.0.1:4173) erreichbar. Für Fernzugriff kannst du einen SSH-Tunnel zum Server verwenden. `AGENTBENCH_PORT`, `AGENTBENCH_BIND` und `AGENTBENCH_SEED` lassen sich in `.env` ändern und mit `docker compose up -d` anwenden. Wenn ein vorhandenes Datenverzeichnis einem anderen Benutzer gehört, setze `AGENTBENCH_UID` und `AGENTBENCH_GID` auf dessen numerische IDs. Für ein Update dienen `docker compose pull` und anschließend `docker compose up -d --wait`.
+Die Oberfläche ist auf dem Server standardmäßig unter [http://127.0.0.1:4173](http://127.0.0.1:4173) erreichbar. Für Fernzugriff kannst du einen SSH-Tunnel zum Server verwenden. `AGENTBENCH_PORT` und `AGENTBENCH_BIND` lassen sich in `.env` ändern und mit `docker compose up -d` anwenden. Für LAN-Zugriff setze `AGENTBENCH_BIND=0.0.0.0` und begrenze den Zugriff per Firewall auf das LAN, da die Oberfläche keine Anmeldung hat. Wenn ein vorhandenes Datenverzeichnis einem anderen Benutzer gehört, setze `AGENTBENCH_UID` und `AGENTBENCH_GID` auf dessen numerische IDs. Aktualisiere im bestehenden Ordner `agentbench` die Compose-Datei und das Image. Die vorhandene `.env` und der Ordner `data/` bleiben erhalten.
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/Elias02345/agentbench/main/compose.yaml -o compose.yaml.new && mv compose.yaml.new compose.yaml && docker compose pull && docker compose up -d --wait
+```
 
 Die GitHub-Actions-Pipeline prüft den Erststart und die Persistenz unter Compose und veröffentlicht danach Images für Linux auf AMD64 und ARM64. Bei der ersten GHCR-Veröffentlichung kann das Paket von GitHub zunächst als privat angelegt werden. Für anonymen Download ist ein öffentliches Paket erforderlich. Bei einem privaten Paket ist eine GHCR-Anmeldung mit Leseberechtigung erforderlich.
 
@@ -43,14 +47,16 @@ Voraussetzung ist Node.js 24 oder neuer. Das Projekt hat keine zusätzlichen Pak
 npm start
 ```
 
-Öffne [AgentBench im lokalen Browser](http://127.0.0.1:4173). Zwei gekennzeichnete, geskriptete Demo-Läufe zeigen die Auswertung ohne API-Zugang. Du kannst im Dialog **Neuer Testlauf** sofort weitere Demos starten.
+Öffne [AgentBench im lokalen Browser](http://127.0.0.1:4173) und füge dein erstes Modell hinzu.
 
 ## Eigene Modelle testen
 
-1. Trage unter **API-Verbindung** die Basis-URL deines Anbieters ein, beispielsweise `https://provider.example/v1` oder `http://127.0.0.1:11434/v1`, sowie bei Bedarf einen API-Schlüssel.
-2. Verwende **Modelle abrufen**, falls der Anbieter `GET /models` unterstützt. Für die Ausführung muss das gewählte Modell `POST /chat/completions` mit Funktionsaufrufen unterstützen.
-3. Öffne **Neuer Testlauf → API verwenden** und gib pro Zeile eine Modell-ID ein. Wähle bis zu fünf Modelle am selben Endpunkt, die Szenarien, die Testsprachen und das Rundenlimit. Wiederholungen starten mit demselben Ausgangszustand und jeweils einer neuen Unterhaltung. Für Modelle an unterschiedlichen Endpunkten starte je einen Lauf mit derselben Konfiguration.
-4. Öffne den **Modellvergleich** für Gesamtscore, Ergebnisse je Sprache und Workflow, kritische Verstöße, Werkzeugaufrufe, Laufzeit und vom Anbieter gemeldete Tokens. Die Laufdetails enthalten Kriterien, Abschlussantwort, Aktionsprotokoll und JSON-Export.
+1. Öffne **Modelle & API** und gib die Basis-URL, die genaue Modell-ID und bei Bedarf einen API-Schlüssel ein. Die URL kann zum Beispiel `https://provider.example/v1` sein.
+2. Mit **Modelle abrufen** kannst du IDs aus `GET /models` übernehmen. **Verbindung prüfen** führt über `POST /chat/completions` einen Funktionsaufruf samt Werkzeugantwort aus. Die Prüfung verwendet das gewählte Modell und zeigt bei einem Fehler die Antwort des Anbieters.
+3. Speichere das Modell und wähle unter **Neuer Testlauf** bis zu fünf gespeicherte Modelle, Szenarien und Sprachen aus. Der Worker arbeitet alle Läufe, Wiederholungen und Aufgaben nacheinander ab. Jedes Szenario startet mit einer neuen Unterhaltung und demselben Ausgangszustand.
+4. Öffne den **Modellvergleich** für Ergebnisse je Sprache und Workflow, kritische Verstöße, Werkzeugaufrufe, Laufzeit und vom Anbieter gemeldete Tokens. Die Laufdetails enthalten Kriterien, Anbieterfehler, Abschlussantwort, Aktionsprotokoll und JSON-Export.
+
+Wenn der Modellanbieter auf demselben Docker-Host läuft, verwende beispielsweise `http://host.docker.internal:11434/v1` für Ollama. Der Modellserver muss die Verbindung vom Container-Netz annehmen. Eine API in einem anderen Container kann in einem gemeinsamen Docker-Netz ihren Dienstnamen als Host verwenden.
 
 ## Szenarien und Auswertung
 
@@ -71,9 +77,9 @@ Für vollständige Läufe ergibt sich die Eignung aus Score, Bestehensquote und 
 
 Der Worker arbeitet die Warteschlange weiter ab, solange der Server läuft. Der Browser kann währenddessen geschlossen werden. Ereignisse im Überwachungsszenario folgen einer virtuellen Uhr. Außer dem konfigurierten Modellanbieter werden alle Werkzeuge im Server simuliert.
 
-Läufe und Aktionsprotokolle liegen in `data/agentbench.sqlite`. Der gespeicherte API-Schlüssel liegt bis zum Neustart ausschließlich im Arbeitsspeicher. Beim Neustart werden laufende und eingereihte Jobs als unterbrochen markiert. Über **Erneut ausführen** lässt sich ein Lauf mit derselben Konfiguration starten.
+Modelle, Läufe und Aktionsprotokolle liegen in `data/agentbench.sqlite`. Ein API-Schlüssel bleibt standardmäßig bis zum Neustart im Arbeitsspeicher. Die Option zum Speichern hinterlegt ihn in der lokalen Datenbank, auf die nur der Dateieigentümer zugreifen kann. Sichere den Datenordner entsprechend, wenn du diese Option verwendest. Beim Neustart werden laufende und eingereihte Jobs als unterbrochen markiert. Über **Erneut ausführen** lässt sich ein Lauf mit derselben Konfiguration starten.
 
-Der Server bindet standardmäßig an die lokale Loopback-Adresse und ist für die Einzelplatznutzung ausgelegt. `PORT`, `HOST` und `AGENTBENCH_DATA_DIR` konfigurieren Listener und Datenspeicher. `AGENTBENCH_SEED=0` startet eine leere Datenbank ohne Demo-Läufe. Für dauerhaften Betrieb lässt sich `npm start` mit einem Prozessmanager ausführen.
+Der Server bindet standardmäßig an die lokale Loopback-Adresse und ist für die Einzelplatznutzung ausgelegt. `PORT`, `HOST` und `AGENTBENCH_DATA_DIR` konfigurieren Listener und Datenspeicher. Für dauerhaften Betrieb lässt sich `npm start` mit einem Prozessmanager ausführen.
 
 ```bash
 npm test
@@ -83,4 +89,4 @@ Die Tests decken die Referenzpfade in beiden Sprachen, die virtuelle Uhr, kritis
 
 ## English quick start
 
-Run `npm start` with Node.js 24 or newer and open [AgentBench](http://127.0.0.1:4173). Select **EN** in the top bar. Under **API connection**, enter your Chat Completions base URL and optional key. Use **New benchmark → Use API** and enter one tool-capable model ID per line. Select English, German, or both. The background worker runs independently of the browser while the server is running. Use **Model comparison** for same-configuration results and open a run to view criteria, traces, and its JSON export.
+Run `npm start` with Node.js 24 or newer, open [AgentBench](http://127.0.0.1:4173), and select **EN**. Under **Models & API**, enter your Chat Completions base URL, the model ID, and an optional key. Use **Check connection** to verify function tools. Save the model and select it under **New benchmark**. The worker processes models and scenarios one at a time even after the browser closes.

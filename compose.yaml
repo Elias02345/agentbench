@@ -16,7 +16,6 @@ services:
       AGENTBENCH_IMAGE: *image
       AGENTBENCH_BIND: "${AGENTBENCH_BIND:-127.0.0.1}"
       AGENTBENCH_PORT: "${AGENTBENCH_PORT:-4173}"
-      AGENTBENCH_SEED: "${AGENTBENCH_SEED:-1}"
       AGENTBENCH_UID: "${AGENTBENCH_UID:-1000}"
       AGENTBENCH_GID: "${AGENTBENCH_GID:-1000}"
     volumes:
@@ -38,8 +37,8 @@ services:
     cap_drop: [ALL]
     security_opt: [no-new-privileges:true]
     stop_grace_period: 30s
-    environment:
-      AGENTBENCH_SEED: "${AGENTBENCH_SEED:-1}"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     ports:
       - target: 4173
         published: "${AGENTBENCH_PORT:-4173}"

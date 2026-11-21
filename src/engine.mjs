@@ -127,31 +127,48 @@ function demoClient(scenario, lang, variant) {
 }
 
 export class ProviderError extends Error {
-  constructor(code) { super(code); this.code=code; }
+  constructor(code, detail = '') {
+    super(code);
+    this.code = code;
+    this.detail = detail;
+  }
 }
+
 export function normalizeEndpoint(input) {
+  if (typeof input !== 'string' || input.length > 2048) throw new ProviderError('invalid_endpoint');
   let url;
-  try { url = new URL(input); } catch { throw new ProviderError('invalid_endpoint'); }
+  try { url = new URL(input.trim()); } catch { throw new ProviderError('invalid_endpoint'); }
   if (!['http:','https:'].includes(url.protocol) || url.username || url.password || url.search || url.hash) throw new ProviderError('invalid_endpoint');
-  return url.href.replace(/\/+$/, '').replace(/\/chat\/completions$/, '');
+  const path = url.pathname.replace(/\/+$/, '').replace(/\/(?:chat\/completions|models)$/, '');
+  return url.origin + (path || '/v1');
 }
 function headers(key) {
   return { 'content-type':'application/json', ...(key ? { authorization:'Bearer '+key } : {}) };
 }
-async function request(url, options, signal, timeoutMs=45000) {
+function errorDetail(payload,key) {
+  const message = payload?.error?.message ?? payload?.error ?? payload?.message;
+  if (typeof message !== 'string') return '';
+  return (key ? message.replaceAll(key, '[REDACTED]') : message)
+    .replace(/Bearer\s+[^\s,;]+/gi,'Bearer [REDACTED]')
+    .replace(/sk-[a-z0-9_-]{8,}/gi,'[REDACTED]')
+    .replace(/\s+/g,' ').trim().slice(0,500);
+}
+async function request(url, options, signal, key, timeoutMs=120000) {
   let response;
   try {
     response = await fetch(url,{
-      ...options, redirect:'error', signal:AbortSignal.any([signal,AbortSignal.timeout(timeoutMs)]),
+      ...options, redirect:'manual', signal:AbortSignal.any([signal,AbortSignal.timeout(timeoutMs)]),
     });
   } catch(error) {
     if (signal.aborted) throw signal.reason;
     throw new ProviderError(error.name==='TimeoutError'?'provider_timeout':'provider_unreachable');
   }
-  if (!response.ok) {
+  if (response.status>=300 && response.status<400) {
     await response.body?.cancel().catch(()=>{});
-    throw new ProviderError('provider_http_'+response.status);
+    throw new ProviderError('provider_redirect');
   }
+  const httpCode = 'provider_http_'+response.status;
+  let payload;
   try {
     const reader=response.body.getReader();
     const decoder=new TextDecoder();
@@ -160,51 +177,83 @@ async function request(url, options, signal, timeoutMs=45000) {
       const {done,value}=await reader.read();
       if (done) break;
       size+=value.byteLength;
-      if (size>2_000_000) {
+      if (size>(response.ok?2_000_000:32_000)) {
         await reader.cancel();
-        throw new ProviderError('provider_response_too_large');
+        throw new ProviderError(response.ok?'provider_response_too_large':httpCode);
       }
       text+=decoder.decode(value,{stream:true});
     }
-    return JSON.parse(text+decoder.decode());
+    payload=JSON.parse(text+decoder.decode());
   } catch(error) {
     if (signal.aborted) throw signal.reason;
     if (error instanceof ProviderError) throw error;
+    if (!response.ok) throw new ProviderError(httpCode);
     if (error.name==='TimeoutError' || error.name==='AbortError') throw new ProviderError('provider_timeout');
     throw new ProviderError('provider_invalid_json');
   }
+  if (!response.ok) throw new ProviderError(httpCode,errorDetail(payload,key));
+  if (payload?.error) throw new ProviderError('provider_reported_error',errorDetail(payload,key));
+  return payload;
 }
-const transient = /^(?:provider_http_(?:408|429|50[0234])|provider_timeout|provider_unreachable)$/;
+const transient = /^(?:provider_http_(?:408|429|50[0234])|provider_timeout)$/;
 export async function listModels(endpoint,key,signal) {
-  const result=await request(normalizeEndpoint(endpoint)+'/models',{headers:headers(key)},signal,15000);
+  const result=await request(normalizeEndpoint(endpoint)+'/models',{headers:headers(key)},signal,key,15000);
   if (!Array.isArray(result?.data)) throw new ProviderError('provider_invalid_models');
-  return result.data.map(item=>item?.id).filter(id=>typeof id==='string' && id.length<=180).slice(0,250);
+  return result.data.map(item=>item?.id).filter(id=>typeof id==='string' && id.length<=180 && (!key || !id.includes(key))).slice(0,250);
 }
-function liveClient({endpoint,key,model,signal,trace}) {
+function liveClient({endpoint,key,model,signal,trace=()=>{},attempts=3}) {
   const url=endpoint+'/chat/completions';
   return async (messages,tools) => {
     let result;
     for (let attempt=0; ; attempt++) {
       try {
-        result=await request(url,{method:'POST',headers:headers(key),body:JSON.stringify({model,messages,tools,stream:false})},signal);
+        result=await request(url,{method:'POST',headers:headers(key),body:JSON.stringify({model,messages,tools,stream:false})},signal,key);
         break;
       } catch(error) {
-        if (attempt===2 || !transient.test(error.code ?? '')) throw error;
-        trace({type:'retry',code:error.code,attempt:attempt+1});
+        if (attempt+1===attempts || !transient.test(error.code ?? '')) throw error;
+        trace({type:'retry',code:error.code,detail:error.detail,attempt:attempt+1});
         await new Promise(resolve=>setTimeout(resolve,500*(attempt+1)));
         signal.throwIfAborted();
       }
     }
     const choice=result?.choices?.[0];
     const message=choice?.message;
-    if (!message || (typeof message.content!=='string' && !Array.isArray(message.tool_calls) && typeof message.refusal!=='string')) throw new ProviderError('provider_invalid_message');
-    if (Array.isArray(message.tool_calls) && message.tool_calls.some(call=>typeof call?.id!=='string' || !call.id || call.type!=='function' || typeof call.function?.name!=='string' || typeof call.function?.arguments!=='string')) throw new ProviderError('provider_invalid_tools');
-    const passThrough={ role:'assistant',content:message.content ?? message.refusal ?? null };
-    if (Array.isArray(message.tool_calls) && message.tool_calls.length) passThrough.tool_calls=message.tool_calls;
+    if (!message || typeof message!=='object') throw new ProviderError('provider_invalid_message');
+    if (message.tool_calls!=null && !Array.isArray(message.tool_calls)) throw new ProviderError('provider_invalid_tools');
+    const content=typeof message.content==='string'?message.content
+      : Array.isArray(message.content)?message.content.map(part=>typeof part?.text==='string'?part.text:'').join('')
+        : typeof message.refusal==='string'?message.refusal:null;
+    if (content===null && !message.tool_calls?.length) throw new ProviderError('provider_invalid_message');
+    const passThrough={role:'assistant',content};
+    if (message.tool_calls?.length) {
+      passThrough.tool_calls=message.tool_calls.map((call,index)=>{
+        const fn=call?.function;
+        if (!fn || typeof fn.name!=='string' || (call.type && call.type!=='function')) throw new ProviderError('provider_invalid_tools');
+        const args=typeof fn.arguments==='string' ? fn.arguments
+          : fn.arguments && typeof fn.arguments==='object' && !Array.isArray(fn.arguments) ? JSON.stringify(fn.arguments) : null;
+        if (args===null) throw new ProviderError('provider_invalid_tools');
+        const id=typeof call.id==='string' && call.id ? call.id : 'call_'+messages.length+'_'+index;
+        return {id,type:'function',function:{name:fn.name,arguments:args}};
+      });
+    }
     // Some compatible reasoning models require their reasoning field on tool turns.
     if (passThrough.tool_calls && typeof message.reasoning_content==='string') passThrough.reasoning_content=message.reasoning_content;
     return {message:passThrough,usage:result.usage,finishReason:choice.finish_reason};
   };
+}
+
+export async function probeModel({endpoint,model,key,signal}) {
+  const client=liveClient({endpoint,key,model,signal,attempts:1});
+  const tools=[{type:'function',function:{name:'read_test_value',description:'Read a test value',
+    parameters:{type:'object',properties:{},additionalProperties:false}}}];
+  const messages=[{role:'user',content:'Call the read_test_value tool once. After receiving its result, reply with the value it returned.'}];
+  const {message}=await client(messages,tools);
+  if (message.tool_calls?.length!==1 || message.tool_calls[0].function.name!=='read_test_value') throw new ProviderError('provider_no_tool_call');
+  const call=message.tool_calls[0];
+  messages.push(message,{role:'tool',tool_call_id:call.id,content:'{"value":"AGENTBENCH-OK"}'});
+  const followUp=await client(messages,tools);
+  if (followUp.message.tool_calls?.length || !followUp.message.content?.includes('AGENTBENCH-OK')) throw new ProviderError('provider_no_tool_result');
+  return {ok:true};
 }
 
 export async function evaluate({scenario,lang,mode,model,endpoint,key,maxTurns,signal,trace}) {
@@ -222,7 +271,7 @@ export async function evaluate({scenario,lang,mode,model,endpoint,key,maxTurns,s
   const {world,tools,execute}=createWorld(scenario,lang);
   const client=mode==='demo' ? demoClient(scenario,lang,model==='Demo Lite'?'lite':'operator') : liveClient({endpoint,key,model,signal,trace:emit});
   const messages=[{role:'system',content:instruction[lang]},{role:'user',content:scenario.task[lang]}];
-  let reply='', calls=0, failedTools=0, turns=0, tokens=0, usageTurns=0, endReason='turn_limit', code=null;
+  let reply='', calls=0, failedTools=0, turns=0, tokens=0, usageTurns=0, endReason='turn_limit', code=null, detail='';
   const maxCalls=maxTurns*4;
   try {
     for (;turns<maxTurns && endReason==='turn_limit';) {
@@ -261,9 +310,10 @@ export async function evaluate({scenario,lang,mode,model,endpoint,key,maxTurns,s
     if (!(error instanceof ProviderError)) throw error;
     endReason='provider_error';
     code=error.code;
-    emit({type:'error',code});
+    detail=error.detail;
+    emit({type:'error',code,detail});
   }
-  const metrics={turns,calls,failedTools,tokens:usageTurns?tokens:null,usageComplete:usageTurns===turns && turns>0,durationMs:Math.round(performance.now()-start),endReason,code};
+  const metrics={turns,calls,failedTools,tokens:usageTurns?tokens:null,usageComplete:usageTurns===turns && turns>0,durationMs:Math.round(performance.now()-start),endReason,code,detail};
   const scores=endReason==='provider_error'?{}:grade(scenario,world,reply,lang);
   return redact({...scores,...metrics,reply});
 }
